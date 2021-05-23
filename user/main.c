@@ -2,7 +2,6 @@
 #include "led.h"
 #include "usart.h"
 #include "spi.h"
-#include "w5500.h"
 #include "string.h"
 #include "socket.h"
 #include "dhcp.h"
@@ -53,86 +52,103 @@ uint8_t buf[DATA_BUF_SIZE];
 
 int32_t loopback_tcpc(uint8_t sn, uint8_t* buf, uint8_t* destip, uint16_t destport)
 {
-  int32_t ret; // return value for SOCK_ERRORs
-  uint16_t size = 0, sentsize=0;
+   int32_t ret; // return value for SOCK_ERRORs
+   uint16_t size = 0, sentsize=0;
 
-  // Destination (TCP Server) IP info (will be connected)
-  // >> loopback_tcpc() function parameter
-  // >> Ex)
-  //   	uint8_t destip[4] = 	{192, 168, 1, 121};
-  //  	uint16_t destport = 	6000;
-  // Port number for TCP client (will be increased)
-  uint16_t any_port = 	50000;
-  uint8_t sw = getSn_SR(sn);	 
-  switch(sw) {
-    case SOCK_ESTABLISHED:
-      if(getSn_IR(sn) & Sn_IR_CON) {// Socket n interrupt register mask; TCP CON interrupt = connection with peer is successful
-#ifdef _LOOPBACK_DEBUG_
-        printf("%d:Connected to - %d.%d.%d.%d : %d\r\n",sn, destip[0], destip[1], destip[2], destip[3], destport);
-#endif
-        setSn_IR(sn, Sn_IR_CON);  // this interrupt should be write the bit cleared to '1'
-      }
+   // Destination (TCP Server) IP info (will be connected)
+   // >> loopback_tcpc() function parameter
+   // >> Ex)
+   //	uint8_t destip[4] = 	{192, 168, 0, 214};
+   //	uint16_t destport = 	5000;
 
-      //////////////////////////////////////////////////////////////////////////////////////////////
-      // Data Transaction Parts; Handle the [data receive and send] process
-      //////////////////////////////////////////////////////////////////////////////////////////////
-      if((size = getSn_RX_RSR(sn)) > 0) { // Sn_RX_RSR: Socket n Received Size Register, Receiving data length
-        if(size > DATA_BUF_SIZE) size = DATA_BUF_SIZE; // DATA_BUF_SIZE means user defined buffer size (array)
-        ret = recv(sn, buf, size); // Data Receive process (H/W Rx socket buffer -> User's buffer)
-        // if(ret <= 0) 
-        // return ret; // If the received data length <= 0, receive failed and process end
-        sentsize = 0;
-        return size;
-        // Data sentsize control
-        /* while(size != sentsize) {
-          ret = send(sn, buf+sentsize, size-sentsize); // Data send process (User's buffer -> Destination through H/W Tx socket buffer)
-          if(ret < 0) {// Send Error occurred (sent data length < 0)
-            close(sn); // socket close
-            return ret;
-          }
-          sentsize += ret; // Don't care SOCKERR_BUSY, because it is zero.
-        }*/
-      }
-      break;
+   // Port number for TCP client (will be increased)
+   static uint16_t any_port = 	50000;
 
-    case SOCK_CLOSE_WAIT:
+   // Socket Status Transitions
+   // Check the W5500 Socket n status register (Sn_SR, The 'Sn_SR' controlled by Sn_CR command or Packet send/recv status)
+   switch(getSn_SR(sn))
+   {
+      case SOCK_ESTABLISHED :
+         if(getSn_IR(sn) & Sn_IR_CON)	// Socket n interrupt register mask; TCP CON interrupt = connection with peer is successful
+         {
 #ifdef _LOOPBACK_DEBUG_
-      printf("%d:CloseWait\r\n",sn);
+			printf("%d:Connected to - %d.%d.%d.%d : %d\r\n",sn, destip[0], destip[1], destip[2], destip[3], destport);
 #endif
-      if((ret=disconnect(sn)) != SOCK_OK) return ret;
-#ifdef _LOOPBACK_DEBUG_
-      printf("%d:Socket Closed\r\n", sn);
-#endif
-      break;
+			setSn_IR(sn, Sn_IR_CON);  // this interrupt should be write the bit cleared to '1'
+         }
 
-    case SOCK_INIT :
-#ifdef _LOOPBACK_DEBUG_
-      printf("%d:Try to connect to the %d.%d.%d.%d : %d\r\n", sn, destip[0], destip[1], destip[2], destip[3], destport);
-#endif
-      if( (ret = connect(sn, destip, destport)) != SOCK_OK) return ret;	//	Try to TCP connect to the TCP server (destination)
-      break;
+         //////////////////////////////////////////////////////////////////////////////////////////////
+         // Data Transaction Parts; Handle the [data receive and send] process
+         //////////////////////////////////////////////////////////////////////////////////////////////
+		 if((size = getSn_RX_RSR(sn)) > 0) // Sn_RX_RSR: Socket n Received Size Register, Receiving data length
+         {
+			if(size > DATA_BUF_SIZE) size = DATA_BUF_SIZE; // DATA_BUF_SIZE means user defined buffer size (array)
+			ret = recv(sn, buf, size); // Data Receive process (H/W Rx socket buffer -> User's buffer)
 
-    case SOCK_CLOSED:
-      close(sn);
-      if((ret=socket(sn, Sn_MR_TCP, any_port++, 0x00)) != sn) return ret; // TCP socket open with 'any_port' port number
+			if(ret <= 0) return ret; // If the received data length <= 0, receive failed and process end
+			size = (uint16_t) ret;
+			sentsize = 0;
+
+			// Data sentsize control
+			while(size != sentsize)
+			{
+				ret = send(sn, buf+sentsize, size-sentsize); // Data send process (User's buffer -> Destination through H/W Tx socket buffer)
+				if(ret < 0) // Send Error occurred (sent data length < 0)
+				{
+					close(sn); // socket close
+					return ret;
+				}
+				sentsize += ret; // Don't care SOCKERR_BUSY, because it is zero.
+			}
+         }
+		 //////////////////////////////////////////////////////////////////////////////////////////////
+         break;
+
+      case SOCK_CLOSE_WAIT :
 #ifdef _LOOPBACK_DEBUG_
-      printf("%d:TCP client loopback start\r\n",sn);
-      printf("%d:Socket opened\r\n",sn);
+         //printf("%d:CloseWait\r\n",sn);
 #endif
-      break;
-    default:
-      break;
+         if((ret=disconnect(sn)) != SOCK_OK) return ret;
+#ifdef _LOOPBACK_DEBUG_
+         printf("%d:Socket Closed\r\n", sn);
+#endif
+         break;
+
+      case SOCK_INIT :
+#ifdef _LOOPBACK_DEBUG_
+    	 printf("%d:Try to connect to the %d.%d.%d.%d : %d\r\n", sn, destip[0], destip[1], destip[2], destip[3], destport);
+#endif
+    	 if( (ret = connect(sn, destip, destport)) != SOCK_OK) return ret;	//	Try to TCP connect to the TCP server (destination)
+         break;
+
+      case SOCK_CLOSED:
+    	  close(sn);
+    	  if((ret=socket(sn, Sn_MR_TCP, any_port++, 0x00)) != sn){
+         if(any_port == 0xffff) any_port = 50000;
+         return ret; // TCP socket open with 'any_port' port number
+        } 
+#ifdef _LOOPBACK_DEBUG_
+    	 //printf("%d:TCP client loopback start\r\n",sn);
+         //printf("%d:Socket opened\r\n",sn);
+#endif
+         break;
+      default:
+         break;
    }
-   return 0;
+   return 1;
 }
-
 
 void network_init(void)
 {
-  uint8_t tmpstr[6];	
+  wiz_NetTimeout gWIZNETTIME = {.retry_cnt = 3, .time_100us = 2000};
+  ctlnetwork(CN_SET_TIMEOUT,(void*)&gWIZNETTIME);
+  ctlnetwork(CN_GET_TIMEOUT, (void*)&gWIZNETTIME);
+  printf("TIMEOUT: %d, %d\r\n", gWIZNETTIME.retry_cnt,gWIZNETTIME.time_100us);
+
 	ctlnetwork(CN_SET_NETINFO, (void*)&gWIZNETINFO);	
 	ctlnetwork(CN_GET_NETINFO, (void*)&gWIZNETINFO);
 	// Display Network Information
+  uint8_t tmpstr[6];
 	ctlwizchip(CW_GET_ID,(void*)tmpstr);
 	printf("\r\n=== %s NET CONF ===\r\n",(char*)tmpstr);
 	printf("MAC: %02X:%02X:%02X:%02X:%02X:%02X\r\n",
@@ -211,13 +227,30 @@ int main(void)
       printf("SUB: %d.%d.%d.%d\r\n", gWIZNETINFO.sn[0],gWIZNETINFO.sn[1],gWIZNETINFO.sn[2],gWIZNETINFO.sn[3]);
       printf("DNS: %d.%d.%d.%d\r\n", gWIZNETINFO.dns[0],gWIZNETINFO.dns[1],gWIZNETINFO.dns[2],gWIZNETINFO.dns[3]);
     }
-    //delay_ms(500);
-    int rev = loopback_tcpc(1,buf,destip,destport);
-    if(rev) {
+    delay_ms(500);
+    int rev = loopback_tcpc(1, buf, destip, destport);
+    switch (rev) {
+      case SOCK_OK:
+        ctlnetwork(CN_GET_NETINFO, (void*)&gWIZNETINFO);
+        sprintf((char *)sendbuf,"Message from %d.%d.%d.%d\r\n", gWIZNETINFO.ip[0],gWIZNETINFO.ip[1],gWIZNETINFO.ip[2],gWIZNETINFO.ip[3]);
+        send(1, sendbuf, 30);
+        send(1, buf, rev);
+        break;
+      case SOCKERR_TIMEOUT:
+        printf("REV: TIMEOUT\r\n");
+        break;
+      case SOCKERR_SOCKSTATUS:
+        printf("REV: SOCKSTATUS\r\n");
+        break;
+      default:
+        printf("REV: SOCK ERROR\r\n");
+    }
+
+    /*if(rev) {
       sprintf((char *)sendbuf,"%d\r\n",rev);
       send(1, sendbuf, 10); 				
-      send(1, buf, rev); 	
+      send(1, buf, rev);
       memset(buf,'\0',rev);
-    }			
+    }*/
   }
 }
